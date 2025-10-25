@@ -1,9 +1,7 @@
-use crate::creature::Creature;
 use crate::otb_io::{
-    OTB_BLOCK_START, is_otb_block_end, read_u8_otb, read_u16_le_otb, skip_otb_block,
-    item_loader::Item
+    OTB_BLOCK_START, is_otb_block_end, read_u8_otb, read_u16_le_otb,
+    skip_otb_block,
 };
-use std::collections::HashMap;
 
 /*
 * OTBM format
@@ -38,7 +36,7 @@ use std::collections::HashMap;
 *       y 2 bytes
 *       z 1 byte
 *       tile 0x05
-*           x 1 byte elative to tile area
+*           x 1 byte relative to tile area
 *           y 1 byte relative to tile area
 *           additional properties N bytes
 *           item 0x06
@@ -77,41 +75,39 @@ const ITEM_BLOCK_START: u8 = 0x06;
 const HOUSE_TILE_BLOCK_START: u8 = 0x06;
 const TILE_SPRITE_PROPERTY: u8 = 0x09;
 
-pub struct MapData {
+pub struct OtbMapData {
     pub attrs: Vec<u8>,
     pub waypoints: Vec<u8>,
     pub towns: Vec<u8>,
-    pub tile_areas: Vec<TileArea>,
+    pub tile_areas: Vec<OtbTileArea>,
 }
 
-pub struct TileArea {
+pub struct OtbTileArea {
     pub x: u16,
     pub y: u16,
     pub z: u8,
-    pub tiles: Vec<Tile>,
-    pub house_tiles: Vec<Tile>,
+    pub tiles: Vec<OtbTile>,
+    pub house_tiles: Vec<OtbTile>,
 }
 
 #[derive(Clone)]
-pub struct Tile {
+pub struct OtbTile {
     pub x: u8,
     pub y: u8,
     pub floor_item_server_id: u16,
-    pub floor_item_client_id: u16,
-    pub items: Vec<MapItem>,
-    pub creatures: Vec<Creature>,
+    pub items: Vec<OtbMapItem>,
 }
+
 
 #[derive(Clone)]
-pub struct MapItem {
+pub struct OtbMapItem {
     pub server_id: u16,
-    pub client_id: u16,
-    pub items: Vec<MapItem>,
+    pub items: Vec<OtbMapItem>,
 }
 
-impl MapData {
+impl OtbMapData {
     fn new() -> Self {
-        return MapData {
+        return OtbMapData {
             attrs: vec![],
             waypoints: vec![],
             towns: vec![],
@@ -120,7 +116,7 @@ impl MapData {
     }
 }
 
-pub fn read_file(filepath: &str) -> MapData {
+pub fn read_file(filepath: &str) -> OtbMapData {
     println!("parsing {}", filepath);
     let bytes: Vec<u8> = std::fs::read(filepath).unwrap();
     let mut idx: usize = 0;
@@ -133,7 +129,7 @@ pub fn read_file(filepath: &str) -> MapData {
             }
         }
     }
-    let mut tile_areas: Vec<TileArea> = Vec::new();
+    let mut tile_areas: Vec<OtbTileArea> = Vec::new();
     let towns: Vec<u8> = Vec::new();
     let waypoints: Vec<u8> = Vec::new();
     loop {
@@ -161,7 +157,7 @@ pub fn read_file(filepath: &str) -> MapData {
         }
     }
     println!("done parsing {}", filepath);
-    return MapData {
+    return OtbMapData {
         attrs: vec![],
         waypoints,
         towns,
@@ -169,31 +165,10 @@ pub fn read_file(filepath: &str) -> MapData {
     };
 }
 
-pub fn create_tile_map(
-    map_data: &MapData,
-    item_data: &HashMap<u16, Item>,
-) -> HashMap<(u16, u16, u8), Tile> {
-    let mut map: HashMap<(u16, u16, u8), Tile> = HashMap::new();
-    for area in map_data.tile_areas.iter() {
-        for tile in area.tiles.iter() {
-            let mut t = tile.clone();
-            t.floor_item_client_id = item_data.get(&t.floor_item_server_id).unwrap().client_id;
-            // for item in t.items.iter_mut() {
-            //     item.client_id = item_data.get(&item.server_id).unwrap().client_id;
-            // }
-            map.insert(
-                (area.x + tile.x as u16, area.y + tile.y as u16, area.z),
-                t
-            );
-        }
-    }
 
-    return map;
-}
-
-pub fn parse_tile_area(bytes: &Vec<u8>, idx: &mut usize) -> TileArea {
-    let mut tiles: Vec<Tile> = Vec::new();
-    let house_tiles: Vec<Tile> = Vec::new();
+pub fn parse_tile_area(bytes: &Vec<u8>, idx: &mut usize) -> OtbTileArea {
+    let mut tiles: Vec<OtbTile> = Vec::new();
+    let house_tiles: Vec<OtbTile> = Vec::new();
     let x = read_u16_le_otb(idx, bytes);
     let y = read_u16_le_otb(idx, bytes);
     let z = read_u8_otb(idx, bytes);
@@ -219,7 +194,7 @@ pub fn parse_tile_area(bytes: &Vec<u8>, idx: &mut usize) -> TileArea {
             }
         }
     }
-    return TileArea {
+    return OtbTileArea {
         x,
         y,
         z,
@@ -228,8 +203,8 @@ pub fn parse_tile_area(bytes: &Vec<u8>, idx: &mut usize) -> TileArea {
     };
 }
 
-pub fn parse_tile(bytes: &[u8], idx: &mut usize) -> Tile {
-    let mut items: Vec<MapItem> = Vec::new();
+pub fn parse_tile(bytes: &[u8], idx: &mut usize) -> OtbTile {
+    let mut items: Vec<OtbMapItem> = Vec::new();
     let x = read_u8_otb(idx, bytes);
     let y = read_u8_otb(idx, bytes);
     let mut tile_sprite_id: u16 = 0;
@@ -256,18 +231,16 @@ pub fn parse_tile(bytes: &[u8], idx: &mut usize) -> Tile {
             }
         }
     }
-    return Tile {
+    return OtbTile {
         x,
         y,
         items,
         floor_item_server_id: tile_sprite_id,
-        floor_item_client_id: tile_sprite_id,
-        creatures: vec![],
     };
 }
 
-pub fn parse_items(bytes: &[u8], idx: &mut usize) -> MapItem {
-    let mut items: Vec<MapItem> = Vec::new();
+pub fn parse_items(bytes: &[u8], idx: &mut usize) -> OtbMapItem {
+    let mut items: Vec<OtbMapItem> = Vec::new();
     let id = read_u16_le_otb(idx, bytes);
     loop {
         if is_otb_block_end(*idx, bytes) {
@@ -288,9 +261,8 @@ pub fn parse_items(bytes: &[u8], idx: &mut usize) -> MapItem {
             }
         }
     }
-    return MapItem {
+    return OtbMapItem {
         server_id: id,
-        client_id: id,
         items,
     };
 }

@@ -1,3 +1,19 @@
+use crate::{
+    StaticData,
+    creature::Character,
+    event_handler::{Command, ServerEvent},
+    otb_io::item_loader::ItemType,
+    protocol::{
+        add_item_to_container_payload, add_item_to_inventory_payload, container_payload,
+        creature_added_payload, enter_game_payload, login_payload, map_direction_payload,
+        remove_item_from_container_payload, remove_item_from_inventory_payload,
+        thing_moved_payload,
+    },
+};
+use crate::{
+    map::{Direction, Item, Tile},
+    protocol::{add_thing_payload, remove_thing_payload},
+};
 use std::{
     collections::HashMap,
     sync::{
@@ -5,84 +21,13 @@ use std::{
         mpsc::{Receiver, Sender, TryRecvError},
     },
     thread::sleep,
-    time::{Duration, Instant},
-};
-
-use crate::{
-    StaticData,
-    creature::{Character, Creature},
-    event_handler::{Command, ServerEvent},
-    otb_io::map_loader
+    time::Duration,
+    vec,
 };
 use tokio::net::TcpStream;
 
-const GAME_WORLD_IP: [u8; 4] = [127, 0, 0, 1];
-const GAME_WORLD_PORT: u16 = 7171;
-const VIEWPORT_X: u16 = 8;
-const VIEWPORT_Y: u16 = 6;
-const GROUND_SPEED:u32 = 150;
-
 pub struct State {
-    pub map: HashMap<(u16, u16, u8), map_loader::Tile>,
-}
-
-pub enum Direction {
-    North,
-    South,
-    East,
-    West,
-}
-
-impl Direction {
-    fn move_in_dir(&self, from: (u16, u16, u8)) -> (u16, u16, u8) {
-        return match self {
-            Direction::North => (from.0, from.1 - 1, from.2),
-            Direction::South => (from.0, from.1 + 1, from.2),
-            Direction::East => (from.0 + 1, from.1, from.2),
-            Direction::West => (from.0 - 1, from.1, from.2),
-        };
-    }
-    fn map_description_bounds(&self, pos: (u16, u16, u8)) -> (u16, u16, u16, u16) {
-        return match self {
-            Direction::North => (
-                pos.0 - VIEWPORT_X,
-                pos.0 + VIEWPORT_X + 1,
-                pos.1 - VIEWPORT_Y,
-                pos.1 - VIEWPORT_Y,
-            ),
-            Direction::South => (
-                pos.0 - VIEWPORT_X,
-                pos.0 + VIEWPORT_X + 1,
-                pos.1 + VIEWPORT_Y + 1,
-                pos.1 + VIEWPORT_Y + 1,
-            ),
-            Direction::East => (
-                pos.0 + VIEWPORT_X + 1,
-                pos.0 + VIEWPORT_X + 1,
-                pos.1 - VIEWPORT_Y,
-                pos.1 + VIEWPORT_Y + 1,
-            ),
-            Direction::West => (
-                pos.0 - VIEWPORT_X,
-                pos.0 - VIEWPORT_X,
-                pos.1 - VIEWPORT_Y,
-                pos.1 + VIEWPORT_Y + 1,
-            ),
-        };
-    }
-    fn packet_id(&self) -> u8 {
-        return match self {
-            Direction::North => ServerPacketType::MapNorth as u8,
-            Direction::South => ServerPacketType::MapSouth as u8,
-            Direction::East => ServerPacketType::MapEast as u8,
-            Direction::West => ServerPacketType::MapWest as u8,
-        };
-    }
-}
-
-pub enum LoginPacketType {
-    Motd = 0x14,
-    CharacterList = 0x64,
+    pub map: HashMap<(u16, u16, u8), Tile>,
 }
 
 pub enum ClientPacketType {
@@ -90,17 +35,16 @@ pub enum ClientPacketType {
     PutIntoGame = 0x0A,
 }
 
-pub enum ServerPacketType {
-    GameInit = 0x0A,
-    ThingMoved = 0x6d,
-    FullMap = 0x64,
-    MapNorth = 0x65,
-    MapEast = 0x66,
-    MapSouth = 0x67,
-    MapWest = 0x68,
-    TileUpdate = 0x69,
-    RemoveCreature = 0x6C,
-    CreatureAdded = 0x6A
+#[derive(Clone)]
+pub struct Container {
+    pub container_id: u8,
+    pub parent_id: Option<u16>,
+    pub client_id: u16,
+    pub items: Vec<Item>,
+    pub pos: (u16, u16, u8),
+    pub stack_pos: u8,
+    pub name: String,
+    pub capacity: u8,
 }
 
 pub struct Connection {
@@ -110,14 +54,12 @@ pub struct Connection {
     pub write_buffer: Vec<u8>,
     pub write_idx: usize,
     pub socket: TcpStream,
-    pub is_logged_in: bool,
     pub state: Arc<Mutex<State>>,
     pub event_handler_in: Sender<Command>,
     pub event_receiver: Receiver<ServerEvent>,
     pub character: Option<Character>,
     pub data: Arc<StaticData>,
-    last_moved: Instant,
-    pub is_moving: bool
+    pub open_containers: HashMap<u8, Container>,
 }
 
 impl Connection {
@@ -134,7 +76,6 @@ impl Connection {
             socket,
             read_buffer: vec![0; 4096],
             write_buffer: vec![0; 4096],
-            is_logged_in: false,
             write_idx: 0,
             read_idx: 0,
             state,
@@ -142,8 +83,7 @@ impl Connection {
             character: None,
             data,
             event_receiver,
-            last_moved: Instant::now(),
-            is_moving: false
+            open_containers: HashMap::new(),
         };
     }
 
@@ -153,24 +93,150 @@ impl Connection {
             match self.event_receiver.try_recv() {
                 Ok(event) => match event {
                     ServerEvent::CreatureAdded { cords, creature } => {
-                        println!("creature to client received");
-                        let tile_update =
-                            Connection::tile_update_payload(cords, creature);
-                        payload.extend_from_slice(&tile_update);
+                        let creature_added = creature_added_payload(cords, creature);
+                        payload.extend_from_slice(&creature_added);
                     }
                     ServerEvent::CretureMoved {
                         from,
                         to,
                         stack_pos,
+                        creature_id,
+                        direction,
                     } => {
-                        let creature_moved = Self::thing_moved_payload(from, stack_pos, to);
+                        let creature_moved = thing_moved_payload(from, stack_pos, to);
                         payload.extend_from_slice(&creature_moved);
+                        if creature_id == self.id {
+                            self.character.as_mut().unwrap().position = to;
+                            payload.extend_from_slice(&map_direction_payload(
+                                self.state.clone(),
+                                direction,
+                                to,
+                            ));
+                        }
                     }
                     ServerEvent::EnterGame => {
-                        self.send_enter_game().await;
+                        payload.extend_from_slice(&enter_game_payload(
+                            self.state.clone(),
+                            self.character.as_ref().unwrap().position,
+                            self.id,
+                        ));
                     }
                     ServerEvent::CreatureRemoved { cords, stack_pos } => {
-                        self.send_creature_removed(cords, stack_pos).await;
+                        payload.extend_from_slice(&remove_thing_payload(cords, stack_pos));
+                    }
+                    ServerEvent::ItemMoved {
+                        from,
+                        to,
+                        stack_pos,
+                        item_id,
+                    } => {
+                        let mut container_id: Option<u8> = None;
+                        for (id, container) in self.open_containers.iter() {
+                            if from == container.pos && container.stack_pos == stack_pos {
+                                container_id = Some(*id);
+                            }
+                        }
+                        if let Some(c_id) = container_id {
+                            payload.push(0x6F);
+                            payload.push(c_id);
+                            self.open_containers.remove(&c_id);
+                        }
+
+                        if from.0 < 0xFFFF {
+                            payload.extend_from_slice(&remove_thing_payload(from, stack_pos));
+                        }
+                        if to.0 < 0xFFFF {
+                            payload.extend_from_slice(&add_thing_payload(to, item_id));
+                        }
+                    }
+                    ServerEvent::OpenContainer {
+                        index,
+                        item,
+                        name,
+                        parent_id,
+                        capacity,
+                        cords,
+                        stack_pos,
+                    } => {
+                        let mut has_parent = 0;
+                        let mut container = Container {
+                            container_id: index,
+                            parent_id: None,
+                            client_id: item.client_id,
+                            items: item.items,
+                            pos: cords,
+                            stack_pos,
+                            name,
+                            capacity,
+                        };
+
+                        if let Some(p_id) = parent_id {
+                            has_parent = 1;
+                            container.parent_id = Some(p_id);
+                        }
+                        self.open_containers.insert(index, container.clone());
+                        payload.extend_from_slice(&container_payload(
+                            &container,
+                            container.name.clone(),
+                            capacity,
+                            has_parent,
+                        ));
+                    }
+                    ServerEvent::AddedToContainer {
+                        cords,
+                        stack_pos,
+                        item,
+                        slot,
+                        is_target_container,
+                    } => {
+                        for (container_id, container) in self.open_containers.iter_mut() {
+                            if cords == container.pos && container.stack_pos == stack_pos {
+                                if cords.0 == 0xFFFF && cords.1 & 0x40 != 0x40 {
+                                    let char = self.character.as_mut().unwrap();
+                                    let inventory_item =
+                                        char.inventory.clone().get_from_slot(cords.1);
+                                    if let Some(mut it) = inventory_item {
+                                        it.add_item(item.clone());
+                                        char.inventory.equip(cords.1, it);
+                                    }
+                                }
+                                let mut items = vec![item.clone()];
+                                items.append(&mut container.items);
+                                container.items = items;
+                                payload.extend_from_slice(&add_item_to_container_payload(
+                                    item.client_id,
+                                    *container_id,
+                                ));
+                            }
+                        }
+                    }
+                    ServerEvent::RemovedFromContainer {
+                        cords,
+                        stack_pos,
+                        slot,
+                    } => {
+                        for (container_id, container) in self.open_containers.iter_mut() {
+                            if cords == container.pos && container.stack_pos == stack_pos {
+                                if cords.0 == 0xFFFF && cords.1 & 0x40 != 0x40 {
+                                    let char = self.character.as_mut().unwrap();
+                                    let inventory_item =
+                                        char.inventory.clone().get_from_slot(cords.1);
+                                    if let Some(mut it) = inventory_item {
+                                        it.items.remove(slot as usize);
+                                        char.inventory.equip(cords.1, it);
+                                    }
+                                }
+                                println!(
+                                    "server event removing item from slot {} at cords {:?}",
+                                    slot, cords
+                                );
+                                container.items.remove(slot as usize);
+                                payload.extend_from_slice(&remove_item_from_container_payload(
+                                    *container_id,
+                                    slot,
+                                ));
+                            }
+                        }
                     }
                 },
                 Err(TryRecvError::Empty) => break,
@@ -183,87 +249,8 @@ impl Connection {
     }
 
     pub async fn login(&mut self) {
-        let mut login_payload: Vec<u8> = Vec::new();
-        login_payload.push(LoginPacketType::CharacterList as u8);
-        login_payload.push(self.data.characters.len() as u8);
-        for character in self.data.characters.iter() {
-            login_payload.extend_from_slice(&Self::str_fmt(&character.name));
-            login_payload.extend_from_slice(&Self::str_fmt(&character.world));
-            login_payload.extend_from_slice(&GAME_WORLD_IP);
-            login_payload.extend_from_slice(&GAME_WORLD_PORT.to_le_bytes());
-        }
-        login_payload.extend_from_slice(&1u16.to_le_bytes()); // premium days
-        println!("seinding packet login");
-        self.send_packet(&login_payload).await;
-    }
-
-    pub fn get_map_description(
-        &self,
-        from_x: u16,
-        to_x: u16,
-        from_y: u16,
-        to_y: u16,
-        from_z: u8,
-        to_z: u8,
-    ) -> Vec<u8> {
-        let mut map_description: Vec<u8> = Vec::new();
-        let mut skip: i32 = -1;
-        for z in (from_z..=to_z).rev() {
-            for x in from_x..=to_x {
-                for y in from_y..=to_y {
-                    let state = self.state.lock().unwrap();
-                    match state.map.get(&(x, y, z as u8)) {
-                        Some(tile) => {
-                            if skip >= 0 {
-                                map_description.push(skip as u8);
-                                map_description.push(0xFF);
-                            }
-                            skip = 0;
-                            map_description
-                                .extend_from_slice(&tile.floor_item_client_id.to_le_bytes());
-                            for c in &tile.creatures {
-                                map_description.extend_from_slice(&c.as_bytes());
-                            }
-                        }
-                        None => {
-                            skip += 1;
-                            if skip == 0xFF {
-                                map_description.push(0xFF);
-                                map_description.push(0xFF);
-                                skip = -1;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if skip >= 0 {
-            map_description.push(skip as u8);
-            map_description.push(0xFF);
-        }
-        return map_description;
-    }
-
-    pub async fn send_enter_game(&mut self) {
-        let mut payload: Vec<u8> = Vec::new();
-        let (pos_x, pos_y, pos_z) = self.character.as_ref().unwrap().position;
-        payload.push(ServerPacketType::GameInit as u8);
-        payload.extend_from_slice(&(self.id as u32).to_le_bytes());
-        payload.extend_from_slice(&50u16.to_le_bytes()); // beat 
-        payload.push(0); // can report bugs
-        payload.push(ServerPacketType::FullMap as u8);
-        payload.extend_from_slice(&pos_x.to_le_bytes());
-        payload.extend_from_slice(&pos_y.to_le_bytes());
-        payload.push(pos_z);
-        payload.extend_from_slice(&self.get_map_description(
-            pos_x - VIEWPORT_X,
-            pos_x + VIEWPORT_X + 1,
-            pos_y - VIEWPORT_Y,
-            pos_y + VIEWPORT_Y + 1,
-            0,
-            7,
-        ));
-        self.send_packet(&mut payload).await;
+        self.send_packet(&login_payload(&self.data.characters))
+            .await;
     }
 
     async fn send_packet(&mut self, payload: &[u8]) {
@@ -287,15 +274,6 @@ impl Connection {
             return id;
         }
         return 0;
-    }
-
-    pub fn str_fmt(s: &str) -> Vec<u8> {
-        let mut bytes: Vec<u8> = Vec::new();
-        bytes.extend_from_slice(&(s.len() as u16).to_le_bytes());
-        for byte in s.as_bytes().iter() {
-            bytes.push(*byte);
-        }
-        return bytes;
     }
 
     pub fn read_u8(&mut self) -> u8 {
@@ -325,6 +303,13 @@ impl Connection {
         return text;
     }
 
+    pub fn read_position(&mut self) -> (u16, u16, u8) {
+        let x = self.read_u16_le();
+        let y = self.read_u16_le();
+        let z = self.read_u8();
+        return (x, y, z);
+    }
+
     pub fn handle_enter_game_packet(&mut self) {
         let _client_os = self.read_u16_le();
         let _version = self.read_u16_le();
@@ -352,67 +337,211 @@ impl Connection {
         let _password = self.read_str();
     }
 
-    pub fn tile_update_payload(
-        pos: (u16, u16, u8),
-        creature: Creature,
-    ) -> Vec<u8> {
-        let mut payload: Vec<u8> = Vec::new();
-        payload.push(ServerPacketType::CreatureAdded as u8);
-        payload.extend_from_slice(&pos.0.to_le_bytes());
-        payload.extend_from_slice(&pos.1.to_le_bytes());
-        payload.push(pos.2);
-        payload.extend_from_slice(&creature.as_bytes());
-        return payload;
-    }
-
-    pub fn thing_moved_payload(
-        from: (u16, u16, u8),
-        stack_pos: u8,
-        to: (u16, u16, u8),
-    ) -> Vec<u8> {
-        let mut payload: Vec<u8> = Vec::new();
-        payload.push(ServerPacketType::ThingMoved as u8);
-        payload.extend_from_slice(&from.0.to_le_bytes());
-        payload.extend_from_slice(&from.1.to_le_bytes());
-        payload.push(from.2);
-        payload.push(stack_pos);
-        payload.extend_from_slice(&to.0.to_le_bytes());
-        payload.extend_from_slice(&(to.1).to_le_bytes());
-        payload.push(to.2);
-        return payload;
-    }
-
-    pub async fn send_move_character(&mut self, direction: Direction) {
-        // let mut sleep_time = GROUND_SPEED * 1000 / self.character.as_ref().unwrap().speed as u32;
-        let sleep_time = 50;
+    pub async fn handle_move_character_packets(&mut self, direction: Direction) {
+        // let sleep_time = GROUND_SPEED * 1000 / self.character.as_ref().unwrap().speed as u32;
+        let sleep_time = 75;
         sleep(Duration::from_millis(sleep_time as u64));
-        let mut payload: Vec<u8> = Vec::new();
         let from = self.character.as_ref().unwrap().position;
         let to = direction.move_in_dir(from);
-        self.character.as_mut().unwrap().position = to;
         let _ = self.event_handler_in.send(Command::MoveCreature {
             from,
             to,
+            direction: direction.clone(),
             creature_id: self.id,
             sender_id: self.id,
         });
-        payload.extend_from_slice(&Self::thing_moved_payload(from, 1, to));
-        payload.push(direction.packet_id());
-        let (from_map_x, to_map_x, form_map_y, to_map_y) = direction.map_description_bounds(from);
-        let map_desc =
-            self.get_map_description(from_map_x, to_map_x, form_map_y, to_map_y, 0, from.2);
-        payload.extend_from_slice(&map_desc);
-        self.is_moving = true;
+    }
+
+    pub async fn handle_move_item(&mut self) {
+        let from = self.read_position();
+        let item_id = self.read_u16_le();
+        let stack_pos = self.read_u8();
+        let to = self.read_position();
+        let count = self.read_u8();
+        let mut payload: Vec<u8> = Vec::new();
+        let mut item: Option<Item> = None;
+        let character = self.character.as_mut().unwrap();
+        let mut commands: Vec<Command> = Vec::new();
+        if from.0 == 0xFFFF {
+            // from container
+            if from.1 & 0x40 == 0x40 {
+                let from_container_id = (from.1 & 0x0F) as u8;
+                let container = self.open_containers.get(&from_container_id).unwrap();
+                item = Some(
+                    self.open_containers.get(&from_container_id).unwrap().items[from.2 as usize]
+                        .clone(),
+                );
+                println!("removing from slot {}", from.2);
+                // let _ = self
+                //     .event_handler_in
+                //     .send(Command::RemoveItemFromContainer {
+                //         cords: container.pos,
+                //         stack_pos: container.stack_pos,
+                //         slot: from.2,
+                //         sender_id: self.id,
+                //     });
+                commands.push(Command::RemoveItemFromContainer {
+                        cords: container.pos,
+                        stack_pos: container.stack_pos,
+                        slot: from.2,
+                        sender_id: self.id,
+                    });
+            } else {
+                // from inventory
+                item = character.inventory.remove_from_slot(from.1);
+                payload.extend_from_slice(&remove_item_from_inventory_payload(from.1 as u8));
+            }
+            if let Some(it) = item {
+                if to.0 == 0xFFFF {
+                    // to container
+                    if to.1 & 0x40 == 0x40 {
+                        let to_container_id = (to.1 & 0x0F) as u8;
+                        println!(
+                            "to container {} slot {} item id {}",
+                            to_container_id, to.2, it.client_id
+                        );
+                        let container = self.open_containers.get_mut(&to_container_id).unwrap();
+                        let _ = self.event_handler_in.send(Command::AddToContainer {
+                            cords: container.pos,
+                            stack_pos: container.stack_pos,
+                            item: it,
+                            sender_id: self.id,
+                            slot: to.2,
+                            container: container.clone(),
+                        });
+                    } else {
+                        // to inventory
+                        character.inventory.equip(to.1, it.clone());
+                        payload.extend_from_slice(&add_item_to_inventory_payload(
+                            it.client_id,
+                            to.1 as u8,
+                        ));
+                    }
+                } else {
+                    // to ground
+                    let _ = self.event_handler_in.send(Command::MoveItem {
+                        from,
+                        to,
+                        stack_pos,
+                        count,
+                        item: it,
+                    });
+                }
+            }
+        }
+        // from ground
+        else {
+            let state_handle = self.state.lock().unwrap();
+            let tile = state_handle.map.get(&from).unwrap();
+            // TODO: use actual stackpos
+            item = tile.bot_items.first().cloned();
+            if let Some(it) = item {
+                let _ = self.event_handler_in.send(Command::MoveItem {
+                    from,
+                    to,
+                    stack_pos,
+                    item: it.clone(),
+                    count,
+                });
+                if to.0 == 0xFFFF {
+                    if to.1 & 0x40 == 0x40 {
+                        let to_container_id = (to.1 & 0x0F) as u8;
+                        let container = self.open_containers.get(&to_container_id).unwrap();
+                        let _ = self.event_handler_in.send(Command::AddToContainer {
+                            cords: container.pos,
+                            stack_pos: container.stack_pos,
+                            item: it,
+                            sender_id: self.id,
+                            slot: to.2,
+                            container: container.clone(),
+                        });
+                    } else {
+                        self.character
+                            .as_mut()
+                            .unwrap()
+                            .inventory
+                            .equip(to.1, it.clone());
+                        payload
+                            .extend_from_slice(&add_item_to_inventory_payload(item_id, to.1 as u8));
+                    }
+                }
+            }
+        }
+        for command in commands.iter(){
+            let _ = self.event_handler_in.send(command.clone());
+        }
+        if payload.len() > 0 {
+            self.send_packet(&payload).await;
+        }
+    }
+
+    pub fn handle_use_item(&mut self) {
+        let from = self.read_position();
+        let item_id = self.read_u16_le();
+        let stack_pos = self.read_u8();
+        let index = self.read_u8();
+        let item: Item;
+        if from.0 == 0xFFFF {
+            if from.1 & 0x40 == 0x40 {
+                let container_id = (from.1 & 0x0F) as u8;
+                let container = &self.open_containers.get(&container_id).unwrap();
+                item = container.items[from.2 as usize].clone();
+            } else {
+                if let Some(it) = self
+                    .character
+                    .as_ref()
+                    .unwrap()
+                    .inventory
+                    .clone()
+                    .get_from_slot(from.1)
+                {
+                    item = it;
+                } else {
+                    item = Item {
+                        client_id: item_id,
+                        items: vec![],
+                    };
+                }
+            }
+        } else {
+            item = Item {
+                client_id: item_id,
+                items: vec![],
+            };
+        }
+        let _ = self.event_handler_in.send(Command::UseItem {
+            sender_id: self.id,
+            cords: from,
+            stack_pos,
+            item,
+            index,
+        });
+    }
+
+    pub async fn close_container(&mut self) {
+        let mut payload: Vec<u8> = Vec::new();
+        let container_id = self.read_u8();
+        self.open_containers.remove(&container_id);
+        payload.push(0x6F);
+        payload.push(container_id);
         self.send_packet(&payload).await;
     }
 
-    pub async fn send_creature_removed(&mut self, cords: (u16, u16, u8), stack_pos: u8) {
+    pub async fn container_up(&mut self) {
         let mut payload: Vec<u8> = Vec::new();
-        payload.push(ServerPacketType::RemoveCreature as u8);
-        payload.extend_from_slice(&cords.0.to_le_bytes());
-        payload.extend_from_slice(&cords.1.to_le_bytes());
-        payload.push(cords.2);
-        payload.push(stack_pos);
+        let container_id = self.read_u8();
+        let container = self.open_containers.remove(&container_id).unwrap();
+        println!("parent container {}", container.parent_id.unwrap());
+        let parent_container = self
+            .open_containers
+            .get(&(container.parent_id.unwrap() as u8))
+            .unwrap();
+        payload.extend_from_slice(&container_payload(
+            &parent_container,
+            parent_container.name.clone(),
+            parent_container.capacity,
+            0,
+        ));
         self.send_packet(&payload).await;
     }
 }
