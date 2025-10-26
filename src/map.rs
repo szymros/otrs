@@ -1,10 +1,11 @@
-use crate::protocol::ServerPacketType;
-use crate::otb_io::item_loader::ItemData;
-use crate::otb_io::map_loader::OtbMapItem;
 use crate::{
     connection::State,
     creature::Creature,
-    otb_io::map_loader::{OtbMapData, OtbTile},
+    otb_io::{
+        item_loader::ItemData,
+        map_loader::{OtbMapData, OtbMapItem, OtbTile},
+    },
+    payload::ServerPacketType,
 };
 use std::vec;
 use std::{
@@ -37,7 +38,7 @@ impl Item {
         return item;
     }
 
-    pub fn add_item(&mut self, item:Item){
+    pub fn add_item(&mut self, item: Item) {
         let mut updated_items = vec![item];
         updated_items.append(&mut self.items);
         self.items = updated_items;
@@ -76,6 +77,42 @@ impl Tile {
             }
         }
         return tile;
+    }
+    pub fn get_item_at_stack_pos(&self, stack_pos: u8) -> Option<Item> {
+        let mut counter = 1;
+        for item in self.top_items.iter() {
+            if counter == stack_pos {
+                return Some(item.clone());
+            }
+            counter += 1;
+        }
+        counter += self.creatures.len() as u8;
+        for item in self.bot_items.iter() {
+            if counter == stack_pos {
+                return Some(item.clone());
+            }
+            counter += 1;
+        }
+        return None;
+    }
+
+    pub fn change_at_stack_pos(&mut self, stack_pos: u8, to_item_id: u16) {
+        let mut counter = 1;
+        for item in self.top_items.iter_mut() {
+            if counter == stack_pos {
+                item.client_id = to_item_id;
+                return;
+            }
+            counter += 1;
+        }
+        counter += self.creatures.len() as u8;
+        for item in self.bot_items.iter_mut() {
+            if counter == stack_pos {
+                item.client_id = to_item_id;
+                return;
+            }
+            counter += 1;
+        }
     }
 }
 

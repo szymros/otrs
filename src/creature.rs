@@ -34,7 +34,6 @@ impl Inventory {
     }
 
     pub fn get_from_slot(self, slot: u16) -> Option<Item> {
-        println!("getting item from slot {}", slot);
         let item = match slot {
             1 => self.head,
             2 => self.neck,

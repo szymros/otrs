@@ -2,17 +2,14 @@ use crate::{
     StaticData,
     creature::Character,
     event_handler::{Command, ServerEvent},
-    otb_io::item_loader::ItemType,
-    protocol::{
-        add_item_to_container_payload, add_item_to_inventory_payload, container_payload,
-        creature_added_payload, enter_game_payload, login_payload, map_direction_payload,
-        remove_item_from_container_payload, remove_item_from_inventory_payload,
-        thing_moved_payload,
-    },
-};
-use crate::{
     map::{Direction, Item, Tile},
-    protocol::{add_thing_payload, remove_thing_payload},
+    payload::{
+        add_item_to_container_payload, add_item_to_inventory_payload, add_thing_payload,
+        close_container_payload, container_payload, creature_added_payload, enter_game_payload,
+        login_payload, map_direction_payload, remove_item_from_container_payload,
+        remove_item_from_inventory_payload, remove_thing_payload, thing_moved_payload,
+        thing_transformed_payload,
+    },
 };
 use std::{
     collections::HashMap,
@@ -30,15 +27,10 @@ pub struct State {
     pub map: HashMap<(u16, u16, u8), Tile>,
 }
 
-pub enum ClientPacketType {
-    MoveNorth = 0x65,
-    PutIntoGame = 0x0A,
-}
-
 #[derive(Clone)]
 pub struct Container {
     pub container_id: u8,
-    pub parent_id: Option<u16>,
+    pub parent_id: Option<u8>,
     pub client_id: u16,
     pub items: Vec<Item>,
     pub pos: (u16, u16, u8),
@@ -137,8 +129,7 @@ impl Connection {
                             }
                         }
                         if let Some(c_id) = container_id {
-                            payload.push(0x6F);
-                            payload.push(c_id);
+                            payload.extend_from_slice(&close_container_payload(c_id));
                             self.open_containers.remove(&c_id);
                         }
 
@@ -169,10 +160,12 @@ impl Connection {
                             name,
                             capacity,
                         };
-
                         if let Some(p_id) = parent_id {
                             has_parent = 1;
-                            container.parent_id = Some(p_id);
+                            container.parent_id = Some(0xFF - p_id);
+                            let parent_container = self.open_containers.remove(&p_id).unwrap();
+                            self.open_containers
+                                .insert(container.parent_id.unwrap(), parent_container);
                         }
                         self.open_containers.insert(index, container.clone());
                         payload.extend_from_slice(&container_payload(
@@ -186,8 +179,6 @@ impl Connection {
                         cords,
                         stack_pos,
                         item,
-                        slot,
-                        is_target_container,
                     } => {
                         for (container_id, container) in self.open_containers.iter_mut() {
                             if cords == container.pos && container.stack_pos == stack_pos {
@@ -226,10 +217,6 @@ impl Connection {
                                         char.inventory.equip(cords.1, it);
                                     }
                                 }
-                                println!(
-                                    "server event removing item from slot {} at cords {:?}",
-                                    slot, cords
-                                );
                                 container.items.remove(slot as usize);
                                 payload.extend_from_slice(&remove_item_from_container_payload(
                                     *container_id,
@@ -237,6 +224,15 @@ impl Connection {
                                 ));
                             }
                         }
+                    }
+                    ServerEvent::ThingTransformed {
+                        cords,
+                        stack_pos,
+                        to_item_id,
+                    } => {
+                        payload.extend_from_slice(&thing_transformed_payload(
+                            cords, stack_pos, to_item_id,
+                        ));
                     }
                 },
                 Err(TryRecvError::Empty) => break,
@@ -371,21 +367,12 @@ impl Connection {
                     self.open_containers.get(&from_container_id).unwrap().items[from.2 as usize]
                         .clone(),
                 );
-                println!("removing from slot {}", from.2);
-                // let _ = self
-                //     .event_handler_in
-                //     .send(Command::RemoveItemFromContainer {
-                //         cords: container.pos,
-                //         stack_pos: container.stack_pos,
-                //         slot: from.2,
-                //         sender_id: self.id,
-                //     });
                 commands.push(Command::RemoveItemFromContainer {
-                        cords: container.pos,
-                        stack_pos: container.stack_pos,
-                        slot: from.2,
-                        sender_id: self.id,
-                    });
+                    cords: container.pos,
+                    stack_pos: container.stack_pos,
+                    slot: from.2,
+                    sender_id: self.id,
+                });
             } else {
                 // from inventory
                 item = character.inventory.remove_from_slot(from.1);
@@ -396,14 +383,8 @@ impl Connection {
                     // to container
                     if to.1 & 0x40 == 0x40 {
                         let to_container_id = (to.1 & 0x0F) as u8;
-                        println!(
-                            "to container {} slot {} item id {}",
-                            to_container_id, to.2, it.client_id
-                        );
-                        let container = self.open_containers.get_mut(&to_container_id).unwrap();
-                        let _ = self.event_handler_in.send(Command::AddToContainer {
-                            cords: container.pos,
-                            stack_pos: container.stack_pos,
+                        let container = self.open_containers.get(&to_container_id).unwrap();
+                        commands.push(Command::AddToContainer {
                             item: it,
                             sender_id: self.id,
                             slot: to.2,
@@ -419,7 +400,7 @@ impl Connection {
                     }
                 } else {
                     // to ground
-                    let _ = self.event_handler_in.send(Command::MoveItem {
+                    commands.push(Command::MoveItem {
                         from,
                         to,
                         stack_pos,
@@ -433,10 +414,9 @@ impl Connection {
         else {
             let state_handle = self.state.lock().unwrap();
             let tile = state_handle.map.get(&from).unwrap();
-            // TODO: use actual stackpos
-            item = tile.bot_items.first().cloned();
+            item = tile.get_item_at_stack_pos(stack_pos);
             if let Some(it) = item {
-                let _ = self.event_handler_in.send(Command::MoveItem {
+                commands.push(Command::MoveItem {
                     from,
                     to,
                     stack_pos,
@@ -447,9 +427,7 @@ impl Connection {
                     if to.1 & 0x40 == 0x40 {
                         let to_container_id = (to.1 & 0x0F) as u8;
                         let container = self.open_containers.get(&to_container_id).unwrap();
-                        let _ = self.event_handler_in.send(Command::AddToContainer {
-                            cords: container.pos,
-                            stack_pos: container.stack_pos,
+                        commands.push(Command::AddToContainer {
                             item: it,
                             sender_id: self.id,
                             slot: to.2,
@@ -467,7 +445,7 @@ impl Connection {
                 }
             }
         }
-        for command in commands.iter(){
+        for command in commands.iter().rev() {
             let _ = self.event_handler_in.send(command.clone());
         }
         if payload.len() > 0 {
@@ -518,7 +496,7 @@ impl Connection {
         });
     }
 
-    pub async fn close_container(&mut self) {
+    pub async fn handle_close_container(&mut self) {
         let mut payload: Vec<u8> = Vec::new();
         let container_id = self.read_u8();
         self.open_containers.remove(&container_id);
@@ -527,15 +505,18 @@ impl Connection {
         self.send_packet(&payload).await;
     }
 
-    pub async fn container_up(&mut self) {
+    pub async fn handle_container_up(&mut self) {
         let mut payload: Vec<u8> = Vec::new();
         let container_id = self.read_u8();
         let container = self.open_containers.remove(&container_id).unwrap();
-        println!("parent container {}", container.parent_id.unwrap());
         let parent_container = self
             .open_containers
-            .get(&(container.parent_id.unwrap() as u8))
+            .remove(&(container.parent_id.unwrap() as u8))
             .unwrap();
+        self.open_containers.insert(
+            0xFF - &(container.parent_id.unwrap()),
+            parent_container.clone(),
+        );
         payload.extend_from_slice(&container_payload(
             &parent_container,
             parent_container.name.clone(),

@@ -3,7 +3,7 @@ mod creature;
 mod event_handler;
 mod map;
 mod otb_io;
-mod protocol;
+mod payload;
 use std::{
     collections::HashMap,
     io::ErrorKind,
@@ -13,11 +13,13 @@ use std::{
     },
 };
 
-use crate::connection::{Connection, State};
-use crate::event_handler::{Command, ServerEvent, event_handler};
-use crate::map::{Direction, create_tile_map};
-use creature::{Character, create_characters};
-use otb_io::item_loader::ItemData;
+use crate::{
+    connection::{Connection, State},
+    creature::{Character, create_characters},
+    event_handler::{Command, ServerEvent, event_handler},
+    map::{Direction, create_tile_map},
+    otb_io::item_loader::ItemData,
+};
 use tokio::{io::AsyncWriteExt, net::TcpListener};
 
 struct StaticData {
@@ -139,20 +141,16 @@ async fn on_new_connection(connection: Connection) {
                 break;
             }
             0x78 => {
-                println!("move item");
                 connection.handle_move_item().await;
             }
             0x82 => {
-                println!("use item");
                 connection.handle_use_item();
             }
-            0x87 =>{
-                println!("close container");
-                connection.close_container().await;
+            0x87 => {
+                connection.handle_close_container().await;
             }
-            0x88 =>{
-                println!("container up");
-                connection.container_up().await;
+            0x88 => {
+                connection.handle_container_up().await;
             }
             _ => {
                 println!("packet id not handled");

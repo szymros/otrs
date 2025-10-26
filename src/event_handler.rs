@@ -1,8 +1,10 @@
-use crate::connection::Container;
-use crate::creature::Creature;
-use crate::map::{Direction, Item};
-use crate::otb_io::item_loader::{self, ItemData, ItemType};
-use crate::{StaticData, connection::State};
+use crate::{
+    StaticData,
+    connection::{Container, State},
+    creature::Creature,
+    map::{Direction, Item},
+    otb_io::item_loader::ItemType,
+};
 use std::{
     collections::HashMap,
     sync::{
@@ -42,15 +44,6 @@ pub enum Command {
         item: Item,
         count: u8,
     },
-    RemoveItem {
-        cords: (u16, u16, u8),
-        stack_pos: u8,
-    },
-    AddItem {
-        cords: (u16, u16, u8),
-        stack_pos: u8,
-        item_id: u16,
-    },
     UseItem {
         sender_id: u32,
         cords: (u16, u16, u8),
@@ -59,8 +52,6 @@ pub enum Command {
         index: u8,
     },
     AddToContainer {
-        cords: (u16, u16, u8),
-        stack_pos: u8,
         item: Item,
         sender_id: u32,
         slot: u8,
@@ -104,20 +95,23 @@ pub enum ServerEvent {
         index: u8,
         item: Item,
         name: String,
-        parent_id: Option<u16>,
+        parent_id: Option<u8>,
         capacity: u8,
     },
     AddedToContainer {
         cords: (u16, u16, u8),
         stack_pos: u8,
         item: Item,
-        slot: u8,
-        is_target_container: bool,
     },
     RemovedFromContainer {
         cords: (u16, u16, u8),
         stack_pos: u8,
         slot: u8,
+    },
+    ThingTransformed {
+        cords: (u16, u16, u8),
+        stack_pos: u8,
+        to_item_id: u16,
     },
 }
 
@@ -136,7 +130,7 @@ pub async fn event_handler(
                         cords,
                         creature: creature.clone(),
                     };
-                    broadcast_event(connections.clone(), cords, None, event);
+                    broadcast_event(&connections, cords, None, event);
                 }
                 Command::AddNewConnection { tx, connection_id } => {
                     connections.insert(connection_id, ((0, 0, 0), tx));
@@ -157,7 +151,7 @@ pub async fn event_handler(
                         direction,
                     );
                     if let Some(event) = server_event {
-                        broadcast_event(connections.clone(), to, None, event);
+                        broadcast_event(&connections, to, None, event);
                     }
                 }
                 Command::EnterGame {
@@ -175,7 +169,7 @@ pub async fn event_handler(
                         creature: character_creature.clone(),
                     };
                     broadcast_event(
-                        connections.clone(),
+                        &connections,
                         cords,
                         Some(character_creature.id),
                         creature_event,
@@ -191,7 +185,7 @@ pub async fn event_handler(
                         cords: char_pos,
                         stack_pos: 1,
                     };
-                    broadcast_event(connections.clone(), char_pos, None, event);
+                    broadcast_event(&connections, char_pos, None, event);
                 }
                 Command::MoveItem {
                     from,
@@ -204,7 +198,7 @@ pub async fn event_handler(
                         handle_move_item(state.clone(), from, to, stack_pos, count, item)
                     {
                         let location = if from.0 == 0xFFFF { to } else { from };
-                        broadcast_event(connections.clone(), location, None, event);
+                        broadcast_event(&connections, location, None, event);
                     };
                 }
                 Command::UseItem {
@@ -219,46 +213,34 @@ pub async fn event_handler(
                     let mut item = Some(item);
                     if cords.0 != 0xFFFF {
                         let tile = state_handle.map.get(&cords).unwrap();
-                        // TODO: use actual stackpos
-                        if let Some(it) = tile.bot_items.first() {
+                        if let Some(it) = tile.get_item_at_stack_pos(stack_pos) {
                             item = Some(it.clone());
                         }
                     }
                     if let Some(it) = item {
                         let item_data = data.item_data.get(&it.client_id).unwrap();
-                        match item_data.item_type {
-                            ItemType::Container => {
-                                let (_, tx) = connections.get(&sender_id).unwrap();
-                                let parent_id: Option<u16> =
-                                    if cords.0 == 0xFFFF && cords.1 & 0x40 == 0x40 {
-                                        Some(cords.1 & 0x0F)
-                                    } else {
-                                        None
-                                    };
-                                let _ = tx.send(ServerEvent::OpenContainer {
-                                    cords,
-                                    stack_pos,
-                                    index,
-                                    item: it.clone(),
-                                    name: item_data.item_name.clone(),
-                                    parent_id,
-                                    capacity: 20,
-                                });
-                            }
-                            _ => (),
-                        };
+                        if let ItemType::Container = item_data.item_type {
+                            let (_, tx) = connections.get(&sender_id).unwrap();
+                            let parent_id: Option<u8> =
+                                if cords.0 == 0xFFFF && cords.1 & 0x40 == 0x40 {
+                                    Some((cords.1 & 0x0F) as u8)
+                                } else {
+                                    None
+                                };
+                            let _ = tx.send(ServerEvent::OpenContainer {
+                                cords,
+                                stack_pos,
+                                index,
+                                item: it.clone(),
+                                name: item_data.item_name.clone(),
+                                parent_id,
+                                capacity: 20,
+                            });
+                        }
                     }
                 }
-                Command::RemoveItem { cords, stack_pos } => todo!(),
-                Command::AddItem {
-                    cords,
-                    stack_pos,
-                    item_id,
-                } => todo!(),
                 Command::AddToContainer {
                     sender_id,
-                    cords,
-                    stack_pos,
                     item,
                     slot,
                     container,
@@ -274,24 +256,24 @@ pub async fn event_handler(
                         }
                     }
                     let event = ServerEvent::AddedToContainer {
-                        cords,
-                        stack_pos,
+                        cords: container.pos,
+                        stack_pos: container.stack_pos,
                         item: item.clone(),
-                        slot,
-                        is_target_container,
                     };
 
-                    if cords.0 == 0xFFFF {
-                            let (_, tx) = connections.get(&sender_id).unwrap();
-                            let _ = tx.send(event);
+                    if container.pos.0 == 0xFFFF {
+                        let (_, tx) = connections.get(&sender_id).unwrap();
+                        let _ = tx.send(event);
                     } else {
-                        state_handle.map.entry(cords).and_modify(|tile| {
+                        state_handle.map.entry(container.pos).and_modify(|tile| {
                             if is_target_container {
-                                tile.bot_items[stack_pos as usize - 1].items[slot as usize]
+                                tile.bot_items[container.stack_pos as usize - 1].items
+                                    [slot as usize]
                                     .add_item(item.clone());
                             } else {
-                                tile.bot_items[stack_pos as usize - 1].add_item(item.clone());
-                                broadcast_event(connections.clone(), cords, None, event);
+                                tile.bot_items[container.stack_pos as usize - 1]
+                                    .add_item(item.clone());
+                                broadcast_event(&connections, container.pos, None, event);
                             }
                         });
                     }
@@ -318,7 +300,7 @@ pub async fn event_handler(
                                 .items
                                 .remove(slot as usize);
                         });
-                        broadcast_event(connections.clone(), cords, None, event);
+                        broadcast_event(&connections, cords, None, event);
                     }
                 }
             },
@@ -328,7 +310,7 @@ pub async fn event_handler(
 }
 
 fn broadcast_event(
-    connections: HashMap<u32, ((u16, u16, u8), Sender<ServerEvent>)>,
+    connections: &HashMap<u32, ((u16, u16, u8), Sender<ServerEvent>)>,
     event_pos: (u16, u16, u8),
     sender_id: Option<u32>,
     event: ServerEvent,

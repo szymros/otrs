@@ -1,10 +1,11 @@
 # OT(R)S
-WIP Tibia 7.6 server with basic functionality written in rust.
+Abandoned Tibia 7.6 server with basic functionality written in rust.
 ### Currently supports:
     - reading OTB map files
     - reading OTB item files
-    - logging in/out
     - jank player movement
+    - moving items
+    - containers (has some bugs)
 
 ## Running
 To run this you will need to source an items.otb file, you can find in other open source servers on github.

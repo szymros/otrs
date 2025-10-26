@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::connection::{Container, State};
 use crate::creature::{Character, Creature};
-use crate::map::{get_map_description, Direction, Item, VIEWPORT_X, VIEWPORT_Y};
+use crate::map::{Direction, Item, VIEWPORT_X, VIEWPORT_Y, get_map_description};
 
 const GAME_WORLD_IP: [u8; 4] = [127, 0, 0, 1];
 const GAME_WORLD_PORT: u16 = 7171;
@@ -12,23 +12,19 @@ pub enum LoginPacketType {
     CharacterList = 0x64,
 }
 
-pub enum ClientPacketType {
-    MoveNorth = 0x65,
-    PutIntoGame = 0x0A,
-}
-
 pub enum ServerPacketType {
     GameInit = 0x0A,
-    ThingMoved = 0x6d,
     FullMap = 0x64,
     MapNorth = 0x65,
     MapEast = 0x66,
     MapSouth = 0x67,
     MapWest = 0x68,
     TileUpdate = 0x69,
-    RemoveThing = 0x6C,
     AddThing = 0x6A,
+    RemoveThing = 0x6C,
+    ThingMoved = 0x6D,
     OpenContainer = 0x6E,
+    CloseContainer = 0x6F,
     AddItemToContainer = 0x70,
     RemoveItemFromContainer = 0x72,
     AddItemToInventory = 0x78,
@@ -112,12 +108,7 @@ pub fn add_thing_payload(to: (u16, u16, u8), item_id: u16) -> Vec<u8> {
     payload.extend_from_slice(&item_id.to_le_bytes());
     return payload;
 }
-pub fn container_payload(
-    container: &Container,
-    name: String,
-    capacity: u8,
-    parent: u8,
-) -> Vec<u8> {
+pub fn container_payload(container: &Container, name: String, capacity: u8, parent: u8) -> Vec<u8> {
     let mut payload: Vec<u8> = Vec::new();
     payload.push(ServerPacketType::OpenContainer as u8);
     payload.push(container.container_id);
@@ -129,6 +120,13 @@ pub fn container_payload(
     for inner_item in container.items.iter() {
         payload.extend_from_slice(&inner_item.client_id.to_le_bytes());
     }
+    return payload;
+}
+
+pub fn close_container_payload(container_id: u8) -> Vec<u8> {
+    let mut payload: Vec<u8> = Vec::new();
+    payload.push(ServerPacketType::CloseContainer as u8);
+    payload.push(container_id);
     return payload;
 }
 
@@ -173,11 +171,14 @@ pub fn login_payload(characters: &Vec<Character>) -> Vec<u8> {
     return payload;
 }
 
-pub fn map_direction_payload(state: Arc<Mutex<State>>,direction:Direction, to:(u16,u16,u8))->Vec<u8> {
-    let mut payload: Vec<u8>= Vec::new();
+pub fn map_direction_payload(
+    state: Arc<Mutex<State>>,
+    direction: Direction,
+    to: (u16, u16, u8),
+) -> Vec<u8> {
+    let mut payload: Vec<u8> = Vec::new();
     payload.push(direction.packet_id());
-    let (from_map_x, to_map_x, form_map_y, to_map_y) =
-        direction.map_description_bounds(to);
+    let (from_map_x, to_map_x, form_map_y, to_map_y) = direction.map_description_bounds(to);
     let map_desc = get_map_description(
         state.clone(),
         from_map_x,
@@ -188,5 +189,14 @@ pub fn map_direction_payload(state: Arc<Mutex<State>>,direction:Direction, to:(u
         to.2,
     );
     payload.extend_from_slice(&map_desc);
-    return payload
+    return payload;
+}
+
+pub fn thing_transformed_payload(cords: (u16, u16, u8), stack_pos: u8, id: u16) -> Vec<u8> {
+    let mut payload: Vec<u8> = Vec::new();
+    payload.push(0x6B);
+    payload.extend_from_slice(&write_position(&cords));
+    payload.push(stack_pos);
+    payload.extend_from_slice(&id.to_le_bytes());
+    return payload;
 }
