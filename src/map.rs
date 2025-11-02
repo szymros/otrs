@@ -3,9 +3,10 @@ use crate::{
     creature::Creature,
     otb_io::{
         item_loader::ItemData,
-        map_loader::{OtbMapData, OtbMapItem, OtbTile},
+        map_loader::{OtbMapData, OtbTile},
     },
     payload::ServerPacketType,
+    item::Item
 };
 use std::vec;
 use std::{
@@ -16,34 +17,6 @@ use std::{
 pub const VIEWPORT_X: u16 = 8;
 pub const VIEWPORT_Y: u16 = 6;
 
-#[derive(Clone)]
-pub struct Item {
-    pub client_id: u16,
-    pub items: Vec<Item>,
-}
-
-impl Item {
-    pub fn from_otb_map_item(
-        otb_item: &OtbMapItem,
-        server_id_to_client_id: &HashMap<u16, u16>,
-    ) -> Item {
-        let mut item = Item {
-            client_id: *server_id_to_client_id.get(&otb_item.server_id).unwrap(),
-            items: vec![],
-        };
-        for inner_item in otb_item.items.iter() {
-            item.items
-                .push(Item::from_otb_map_item(inner_item, server_id_to_client_id));
-        }
-        return item;
-    }
-
-    pub fn add_item(&mut self, item: Item) {
-        let mut updated_items = vec![item];
-        updated_items.append(&mut self.items);
-        self.items = updated_items;
-    }
-}
 
 #[derive(Clone)]
 pub struct Tile {
@@ -193,21 +166,12 @@ pub fn get_map_description(
     return map_description;
 }
 
-pub fn full_map_bound(pos: (u16, u16, u8)) -> (u16, u16, u16, u16) {
-    return (
-        pos.0 - VIEWPORT_X,
-        pos.0 + VIEWPORT_X + 1,
-        pos.1 - VIEWPORT_Y,
-        pos.1 + VIEWPORT_Y + 1,
-    );
-}
-
 #[derive(Clone)]
 pub enum Direction {
-    North,
-    South,
-    East,
-    West,
+    North = 0,
+    East = 1,
+    South = 2,
+    West = 3,
 }
 
 impl Direction {

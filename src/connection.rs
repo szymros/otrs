@@ -2,13 +2,15 @@ use crate::{
     StaticData,
     creature::Character,
     event_handler::{Command, ServerEvent},
-    map::{Direction, Item, Tile},
+    item::Item,
+    map::{Direction, Tile},
     payload::{
-        add_item_to_container_payload, add_item_to_inventory_payload, add_thing_payload,
-        close_container_payload, container_payload, creature_added_payload, enter_game_payload,
-        login_payload, map_direction_payload, remove_item_from_container_payload,
-        remove_item_from_inventory_payload, remove_thing_payload, thing_moved_payload,
-        thing_transformed_payload,
+        MagicEffect, SpeechType, add_item_to_container_payload, add_item_to_inventory_payload,
+        add_thing_payload, close_container_payload, container_payload, creature_added_payload,
+        creature_turn_payload, enter_game_payload, login_payload, magic_effect_payload,
+        map_direction_payload, remove_item_from_container_payload,
+        remove_item_from_inventory_payload, remove_thing_payload, speech_payload,
+        thing_moved_payload, thing_transformed_payload,
     },
 };
 use std::{
@@ -84,9 +86,12 @@ impl Connection {
         loop {
             match self.event_receiver.try_recv() {
                 Ok(event) => match event {
-                    ServerEvent::CreatureAdded { cords, creature } => {
-                        let creature_added = creature_added_payload(cords, creature);
-                        payload.extend_from_slice(&creature_added);
+                    ServerEvent::CreatureAdded { pos, creature } => {
+                        payload.extend_from_slice(&creature_added_payload(&pos, creature));
+                        payload.extend_from_slice(&magic_effect_payload(
+                            &pos,
+                            MagicEffect::EnergyArea as u8,
+                        ));
                     }
                     ServerEvent::CretureMoved {
                         from,
@@ -95,8 +100,9 @@ impl Connection {
                         creature_id,
                         direction,
                     } => {
-                        let creature_moved = thing_moved_payload(from, stack_pos, to);
-                        payload.extend_from_slice(&creature_moved);
+                        payload.extend_from_slice(&thing_transformed_payload(&from, stack_pos, None));
+                        payload.extend_from_slice(&creature_turn_payload(direction.clone(), creature_id));
+                        payload.extend_from_slice(&thing_moved_payload(&from, stack_pos, &to));
                         if creature_id == self.id {
                             self.character.as_mut().unwrap().position = to;
                             payload.extend_from_slice(&map_direction_payload(
@@ -109,12 +115,16 @@ impl Connection {
                     ServerEvent::EnterGame => {
                         payload.extend_from_slice(&enter_game_payload(
                             self.state.clone(),
-                            self.character.as_ref().unwrap().position,
+                            &self.character.as_ref().unwrap().position,
                             self.id,
                         ));
                     }
-                    ServerEvent::CreatureRemoved { cords, stack_pos } => {
-                        payload.extend_from_slice(&remove_thing_payload(cords, stack_pos));
+                    ServerEvent::CreatureRemoved { pos, stack_pos } => {
+                        payload.extend_from_slice(&remove_thing_payload(&pos, stack_pos));
+                        payload.extend_from_slice(&magic_effect_payload(
+                            &pos,
+                            MagicEffect::Puff as u8,
+                        ));
                     }
                     ServerEvent::ItemMoved {
                         from,
@@ -134,10 +144,10 @@ impl Connection {
                         }
 
                         if from.0 < 0xFFFF {
-                            payload.extend_from_slice(&remove_thing_payload(from, stack_pos));
+                            payload.extend_from_slice(&remove_thing_payload(&from, stack_pos));
                         }
                         if to.0 < 0xFFFF {
-                            payload.extend_from_slice(&add_thing_payload(to, item_id));
+                            payload.extend_from_slice(&add_thing_payload(&to, &item_id));
                         }
                     }
                     ServerEvent::OpenContainer {
@@ -146,7 +156,7 @@ impl Connection {
                         name,
                         parent_id,
                         capacity,
-                        cords,
+                        pos,
                         stack_pos,
                     } => {
                         let mut has_parent = 0;
@@ -155,66 +165,70 @@ impl Connection {
                             parent_id: None,
                             client_id: item.client_id,
                             items: item.items,
-                            pos: cords,
+                            pos: pos,
                             stack_pos,
                             name,
                             capacity,
                         };
                         if let Some(p_id) = parent_id {
                             has_parent = 1;
-                            container.parent_id = Some(0xFF - p_id);
-                            let parent_container = self.open_containers.remove(&p_id).unwrap();
-                            self.open_containers
-                                .insert(container.parent_id.unwrap(), parent_container);
+                            if container.container_id == p_id {
+                                container.parent_id = Some(0xFF - p_id);
+                                let parent_container = self.open_containers.remove(&p_id).unwrap();
+                                self.open_containers
+                                    .insert(container.parent_id.unwrap(), parent_container);
+                            } else {
+                                container.parent_id = parent_id;
+                            }
                         }
                         self.open_containers.insert(index, container.clone());
                         payload.extend_from_slice(&container_payload(
                             &container,
-                            container.name.clone(),
+                            &container.name,
                             capacity,
                             has_parent,
                         ));
                     }
                     ServerEvent::AddedToContainer {
-                        cords,
+                        pos,
                         stack_pos,
                         item,
                     } => {
                         for (container_id, container) in self.open_containers.iter_mut() {
-                            if cords == container.pos && container.stack_pos == stack_pos {
-                                if cords.0 == 0xFFFF && cords.1 & 0x40 != 0x40 {
+                            if pos == container.pos && container.stack_pos == stack_pos {
+                                if pos.0 == 0xFFFF && pos.1 & 0x40 != 0x40 {
                                     let char = self.character.as_mut().unwrap();
                                     let inventory_item =
-                                        char.inventory.clone().get_from_slot(cords.1);
+                                        char.inventory.clone().get_from_slot(pos.1);
                                     if let Some(mut it) = inventory_item {
                                         it.add_item(item.clone());
-                                        char.inventory.equip(cords.1, it);
+                                        char.inventory.equip(pos.1, it);
                                     }
                                 }
                                 let mut items = vec![item.clone()];
                                 items.append(&mut container.items);
                                 container.items = items;
                                 payload.extend_from_slice(&add_item_to_container_payload(
-                                    item.client_id,
+                                    &item.client_id,
                                     *container_id,
                                 ));
                             }
                         }
                     }
                     ServerEvent::RemovedFromContainer {
-                        cords,
+                        pos,
                         stack_pos,
                         slot,
                     } => {
                         for (container_id, container) in self.open_containers.iter_mut() {
-                            if cords == container.pos && container.stack_pos == stack_pos {
-                                if cords.0 == 0xFFFF && cords.1 & 0x40 != 0x40 {
+                            if pos == container.pos && container.stack_pos == stack_pos {
+                                if pos.0 == 0xFFFF && pos.1 & 0x40 != 0x40 {
                                     let char = self.character.as_mut().unwrap();
                                     let inventory_item =
-                                        char.inventory.clone().get_from_slot(cords.1);
+                                        char.inventory.clone().get_from_slot(pos.1);
                                     if let Some(mut it) = inventory_item {
                                         it.items.remove(slot as usize);
-                                        char.inventory.equip(cords.1, it);
+                                        char.inventory.equip(pos.1, it);
                                     }
                                 }
                                 container.items.remove(slot as usize);
@@ -226,13 +240,36 @@ impl Connection {
                         }
                     }
                     ServerEvent::ThingTransformed {
-                        cords,
+                        pos,
                         stack_pos,
                         to_item_id,
                     } => {
                         payload.extend_from_slice(&thing_transformed_payload(
-                            cords, stack_pos, to_item_id,
+                            &pos,
+                            stack_pos,
+                            Some(to_item_id),
                         ));
+                    }
+                    ServerEvent::CreatureSpoke {
+                        pos,
+                        text,
+                        creature_name,
+                        speech_type,
+                    } => payload.extend_from_slice(&speech_payload(
+                        &text,
+                        &creature_name,
+                        SpeechType::Say,
+                        &pos,
+                    )),
+                    ServerEvent::CreatureTurned {
+                        pos,
+                        stack_pos,
+                        direction,
+                        creature_id,
+                    } => {
+                        payload
+                            .extend_from_slice(&thing_transformed_payload(&pos, stack_pos, None));
+                        payload.extend_from_slice(&creature_turn_payload(direction, creature_id));
                     }
                 },
                 Err(TryRecvError::Empty) => break,
@@ -319,7 +356,7 @@ impl Connection {
                 self.character.as_mut().unwrap().id = self.id;
                 let _ = self.event_handler_in.send(Command::EnterGame {
                     character_creature: self.character.as_ref().unwrap().as_creature(),
-                    cords: character.position,
+                    pos: character.position,
                 });
             }
         }
@@ -333,9 +370,9 @@ impl Connection {
         let _password = self.read_str();
     }
 
-    pub async fn handle_move_character_packets(&mut self, direction: Direction) {
+    pub fn handle_move_character_packets(&mut self, direction: Direction) {
         // let sleep_time = GROUND_SPEED * 1000 / self.character.as_ref().unwrap().speed as u32;
-        let sleep_time = 75;
+        let sleep_time = 58;
         sleep(Duration::from_millis(sleep_time as u64));
         let from = self.character.as_ref().unwrap().position;
         let to = direction.move_in_dir(from);
@@ -344,11 +381,22 @@ impl Connection {
             to,
             direction: direction.clone(),
             creature_id: self.id,
-            sender_id: self.id,
+        });
+    }
+
+    pub fn handle_creature_turn_packets(&mut self, direction: Direction) {
+        let character = self.character.as_ref().unwrap();
+        let pos = character.position;
+        let creature_id = self.id;
+        let _ = self.event_handler_in.send(Command::TurnCreature {
+            pos,
+            creature_id,
+            direction,
         });
     }
 
     pub async fn handle_move_item(&mut self) {
+        // TODO: handle drag and drop onto container
         let from = self.read_position();
         let item_id = self.read_u16_le();
         let stack_pos = self.read_u8();
@@ -363,12 +411,9 @@ impl Connection {
             if from.1 & 0x40 == 0x40 {
                 let from_container_id = (from.1 & 0x0F) as u8;
                 let container = self.open_containers.get(&from_container_id).unwrap();
-                item = Some(
-                    self.open_containers.get(&from_container_id).unwrap().items[from.2 as usize]
-                        .clone(),
-                );
+                item = container.items.get(from.2 as usize).cloned();
                 commands.push(Command::RemoveItemFromContainer {
-                    cords: container.pos,
+                    pos: container.pos,
                     stack_pos: container.stack_pos,
                     slot: from.2,
                     sender_id: self.id,
@@ -382,10 +427,11 @@ impl Connection {
                 if to.0 == 0xFFFF {
                     // to container
                     if to.1 & 0x40 == 0x40 {
+                        // TODO: consider handling the addition here
                         let to_container_id = (to.1 & 0x0F) as u8;
-                        let container = self.open_containers.get(&to_container_id).unwrap();
+                        let container = self.open_containers.get_mut(&to_container_id).unwrap();
                         commands.push(Command::AddToContainer {
-                            item: it,
+                            item: it.clone(),
                             sender_id: self.id,
                             slot: to.2,
                             container: container.clone(),
@@ -425,6 +471,7 @@ impl Connection {
                 });
                 if to.0 == 0xFFFF {
                     if to.1 & 0x40 == 0x40 {
+                        // TODO: consider handling the addition here
                         let to_container_id = (to.1 & 0x0F) as u8;
                         let container = self.open_containers.get(&to_container_id).unwrap();
                         commands.push(Command::AddToContainer {
@@ -445,7 +492,7 @@ impl Connection {
                 }
             }
         }
-        for command in commands.iter().rev() {
+        for command in commands.iter() {
             let _ = self.event_handler_in.send(command.clone());
         }
         if payload.len() > 0 {
@@ -489,7 +536,7 @@ impl Connection {
         }
         let _ = self.event_handler_in.send(Command::UseItem {
             sender_id: self.id,
-            cords: from,
+            pos: from,
             stack_pos,
             item,
             index,
@@ -519,10 +566,34 @@ impl Connection {
         );
         payload.extend_from_slice(&container_payload(
             &parent_container,
-            parent_container.name.clone(),
+            &parent_container.name.clone(),
             parent_container.capacity,
             0,
         ));
         self.send_packet(&payload).await;
+    }
+    pub fn handle_say_packet(&mut self) {
+        let speech_type = self.read_u8();
+        let speech_text = self.read_str();
+        let char_pos = self.character.as_ref().unwrap().position;
+        let char_name = self.character.as_ref().unwrap().name.clone();
+        let _ = self.event_handler_in.send(Command::CreatureSpeech {
+            pos: char_pos,
+            text: speech_text.to_string(),
+            creature_name: char_name,
+            speech_type,
+        });
+    }
+
+    pub fn handle_use_item_on_target_packet(&mut self) {
+        let pos = self.read_position();
+        let item_id = self.read_u16_le();
+        let stack_pos = self.read_u8();
+        let target_pos = self.read_u16_le();
+        let target_stack_pos = self.read_u8();
+    }
+
+    pub async fn handle_ping(&mut self) {
+        self.send_packet(&vec![0x1E]).await;
     }
 }

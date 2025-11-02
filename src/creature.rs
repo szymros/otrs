@@ -1,4 +1,4 @@
-use crate::map::Item;
+use crate::{item::Item, map::Direction};
 
 const KNOWN_CREATURE_ID: u16 = 0x62;
 const UNKNOWN_CREATURE_ID: u16 = 0x61;
@@ -144,7 +144,7 @@ pub struct Character {
     pub outfit: [u8; 4],
     pub position: (u16, u16, u8),
     pub speed: u16,
-    pub look_dir: u8,
+    pub look_dir: Direction,
     pub health: u16,
     pub max_health: u16,
     pub inventory: Inventory,
@@ -160,7 +160,7 @@ impl Character {
             is_known: true,
             health: self.health,
             max_health: self.health,
-            look_dir: self.look_dir,
+            look_dir: self.look_dir.clone(),
             light_level: 0x64,
             light_color: 0xD7,
             speed: self.speed,
@@ -178,7 +178,7 @@ pub struct Creature {
     pub is_known: bool,
     pub health: u16,
     pub max_health: u16,
-    pub look_dir: u8,
+    pub look_dir: Direction,
     pub light_level: u8,
     pub light_color: u8,
     pub speed: u16,
@@ -204,7 +204,7 @@ impl Creature {
         bytes.extend_from_slice(&self.id.to_le_bytes());
         bytes.extend_from_slice(&str_fmt(&self.name));
         bytes.push(((self.health / self.max_health) * 100) as u8);
-        bytes.push(self.look_dir);
+        bytes.push(self.look_dir.clone() as u8);
         bytes.extend_from_slice(&self.outfit_type.to_le_bytes());
         bytes.extend_from_slice(&self.outfit);
         bytes.push(self.light_color);
@@ -224,7 +224,7 @@ pub fn create_characters() -> Vec<Character> {
         outfit: [80, 80, 80, 80],
         health: 100,
         max_health: 100,
-        look_dir: 0,
+        look_dir: Direction::South,
         speed: 220,
         world: "World".to_string(),
         position: (1024, 1024, 7),
@@ -237,7 +237,7 @@ pub fn create_characters() -> Vec<Character> {
         outfit: [30, 30, 30, 30],
         health: 100,
         max_health: 100,
-        look_dir: 0,
+        look_dir: Direction::South,
         speed: 220,
         world: "World".to_string(),
         position: (1024, 1026, 7),

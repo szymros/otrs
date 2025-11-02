@@ -4,6 +4,7 @@ mod event_handler;
 mod map;
 mod otb_io;
 mod payload;
+mod item;
 use std::{
     collections::HashMap,
     io::ErrorKind,
@@ -46,14 +47,15 @@ async fn main() {
 
     let state_clone = state.clone();
     let data_clone = data.clone();
+    let event_handler_in_clone = event_handler_in.clone();
     tokio::spawn(async move {
-        event_handler(event_handler_rx, state_clone, data_clone).await;
+        event_handler(event_handler_rx, event_handler_in_clone,state_clone, data_clone).await;
     });
 
     loop {
         connection_counter += 1;
         let (mut socket, _) = listener.accept().await.unwrap();
-        println!("new connedction accepted");
+        println!("new connection accepted");
         let (tx, rx): (Sender<ServerEvent>, Receiver<ServerEvent>) = mpsc::channel();
         match event_handler_in.send(Command::AddNewConnection {
             tx,
@@ -113,25 +115,24 @@ async fn on_new_connection(connection: Connection) {
             0x0A => {
                 connection.handle_enter_game_packet();
             }
+            0x1E => {
+                connection.handle_ping().await;
+            }
             0x65 => {
                 connection
-                    .handle_move_character_packets(Direction::North)
-                    .await;
+                    .handle_move_character_packets(Direction::North);
             }
             0x66 => {
                 connection
-                    .handle_move_character_packets(Direction::East)
-                    .await;
+                    .handle_move_character_packets(Direction::East);
             }
             0x67 => {
                 connection
-                    .handle_move_character_packets(Direction::South)
-                    .await;
+                    .handle_move_character_packets(Direction::South);
             }
             0x68 => {
                 connection
-                    .handle_move_character_packets(Direction::West)
-                    .await;
+                    .handle_move_character_packets(Direction::West);
             }
             0x69 => {
                 let _ = connection.socket.shutdown().await;
@@ -139,6 +140,18 @@ async fn on_new_connection(connection: Connection) {
                     sender_id: connection.id,
                 });
                 break;
+            }
+            0x6F =>{
+                connection.handle_creature_turn_packets(Direction::North);
+            }
+            0x70 => {
+                connection.handle_creature_turn_packets(Direction::East);
+            }
+            0x71 => {
+                connection.handle_creature_turn_packets(Direction::South);
+            }
+            0x72 => {
+                connection.handle_creature_turn_packets(Direction::West);
             }
             0x78 => {
                 connection.handle_move_item().await;
@@ -151,6 +164,9 @@ async fn on_new_connection(connection: Connection) {
             }
             0x88 => {
                 connection.handle_container_up().await;
+            }
+            0x96 =>{
+                connection.handle_say_packet();
             }
             _ => {
                 println!("packet id not handled");
