@@ -14,5 +14,5 @@ To run this you will need to source an items.otb file, you can find in other ope
 To connect to the server you will need a client, I recommend [otclient](https://github.com/mehah/otclient/tree/main) which is an open source implementation of tibia client. You will find instructions on setting up the clien in their repo
 
 ## Demo
-https://github.com/user-attachments/assets/225d006f-b0f7-46a9-83b1-2485ee3099ec
+https://github.com/user-attachments/assets/3c9785ab-81da-4fd6-ba4b-056208bc2e62
 
